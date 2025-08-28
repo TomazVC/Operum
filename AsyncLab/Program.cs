@@ -24,16 +24,32 @@ string baseDir = Directory.GetCurrentDirectory();
 string tempCsvPath = Path.Combine(baseDir, "municipios.csv");
 string outRoot = Path.Combine(baseDir, OUT_DIR_NAME);
 
-
-
-Console.WriteLine("Baixando CSV de municípios (Receita Federal) ...");
-using (var http = new HttpClient())
+// =================== Verificação do arquivo local ===================
+bool precisaBaixar = true;
+if (File.Exists(tempCsvPath))
 {
-    var bytes = await http.GetByteArrayAsync(CSV_URL);
-    await File.WriteAllBytesAsync(tempCsvPath, bytes);
+    var info = new FileInfo(tempCsvPath);
+    if (info.Length > 0)
+    {
+        Console.WriteLine($"Arquivo CSV já encontrado localmente ({info.Length:N0} bytes, modificado em {info.LastWriteTime:G}). Pulando download.");
+        precisaBaixar = false;
+    }
+    else
+    {
+        Console.WriteLine("Arquivo CSV local está vazio. Será baixado novamente.");
+    }
 }
 
-
+// =================== Download assíncrono (somente se necessário) ===================
+if (precisaBaixar)
+{
+    Console.WriteLine("Baixando CSV de municípios (Receita Federal) ...");
+    using (var http = new HttpClient())
+    {
+        var bytes = await http.GetByteArrayAsync(CSV_URL);
+        await File.WriteAllBytesAsync(tempCsvPath, bytes);
+    }
+}
 
 Console.WriteLine("Lendo e parseando o CSV ...");
 var linhas = await File.ReadAllLinesAsync(tempCsvPath, Encoding.UTF8);
@@ -72,7 +88,6 @@ for (int i = startIndex; i < linhas.Length; i++)
 
 Console.WriteLine($"Registros lidos: {municipios.Count}");
 
-
 // Grupo por UF
 var porUf = new Dictionary<string, List<Municipio>>(StringComparer.OrdinalIgnoreCase);
 foreach (var m in municipios)
@@ -82,13 +97,11 @@ foreach (var m in municipios)
     porUf[m.Uf].Add(m);
 }
 
-
 // Ordena as UFs alfabeticamente e ignora a UF "EX"
 var ufsOrdenadas = porUf.Keys
     .Where(uf => !string.Equals(uf, "EX", StringComparison.OrdinalIgnoreCase))
     .OrderBy(uf => uf, StringComparer.OrdinalIgnoreCase)
     .ToList();
-
 
 // Gera saída
 Directory.CreateDirectory(outRoot);
@@ -109,8 +122,6 @@ foreach (var uf in ufsOrdenadas)
 
     await swOut.WriteLineAsync("TOM;IBGE;NomeTOM;NomeIBGE;UF;Hash");
 
-
-
     var computeTasks = listaUf.Select(m => Task.Run(() =>
     {
         string password = m.ToConcatenatedString();
@@ -123,8 +134,6 @@ foreach (var uf in ufsOrdenadas)
 
     var listaJson = new List<object>(results.Length);
     int count = 0;
-
-
 
     foreach (var (m, hashHex) in results)
     {
@@ -146,7 +155,6 @@ foreach (var uf in ufsOrdenadas)
             Console.WriteLine($"  Parcial: {count}/{results.Length} municípios processados para UF {uf} | Tempo parcial: {FormatTempo(swUf.ElapsedMilliseconds)}");
         }
     }
-
 
     // Salva JSON
     string jsonPath = Path.Combine(outRoot, $"municipios_hash_{uf}.json");
