@@ -22,3 +22,13 @@ Analisar o programa e tornar a sua execução **assíncrona**.
 ---
 
 👨‍🏫 © 2025 | Professor Vinícius Costa Santos
+
+---
+
+👥 Equipe
+
+Pedro Valotto – RM: 551445
+
+Rony Ken Nagai – RM: 551549
+
+Tomáz Versolato Carballo – RM: 551417
