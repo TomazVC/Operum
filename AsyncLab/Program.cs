@@ -1,8 +1,9 @@
 ﻿using System.Diagnostics;
-using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Text.Json;
 using System.Linq;
+using System.Threading.Tasks;
 
 // =================== Configuração ===================
 // Iterações elevadas deixam o trabalho realmente pesado (CPU-bound).
@@ -23,15 +24,19 @@ string baseDir = Directory.GetCurrentDirectory();
 string tempCsvPath = Path.Combine(baseDir, "municipios.csv");
 string outRoot = Path.Combine(baseDir, OUT_DIR_NAME);
 
+
+
 Console.WriteLine("Baixando CSV de municípios (Receita Federal) ...");
-using (var wc = new WebClient())
+using (var http = new HttpClient())
 {
-    wc.Encoding = Encoding.UTF8; // ajuste para ISO-8859-1 se necessário
-    wc.DownloadFile(CSV_URL, tempCsvPath);
+    var bytes = await http.GetByteArrayAsync(CSV_URL);
+    await File.WriteAllBytesAsync(tempCsvPath, bytes);
 }
 
+
+
 Console.WriteLine("Lendo e parseando o CSV ...");
-var linhas = File.ReadAllLines(tempCsvPath, Encoding.UTF8);
+var linhas = await File.ReadAllLinesAsync(tempCsvPath, Encoding.UTF8);
 if (linhas.Length == 0)
 {
     Console.WriteLine("Arquivo CSV vazio.");
@@ -45,7 +50,7 @@ if (linhas[0].IndexOf("IBGE", StringComparison.OrdinalIgnoreCase) >= 0 ||
     startIndex = 1; // pula cabeçalho
 }
 
-var municipios = new List<Municipio>(linhas.Length - startIndex);
+var municipios = new List<Municipio>(Math.Max(0, linhas.Length - startIndex));
 
 for (int i = startIndex; i < linhas.Length; i++)
 {
@@ -67,6 +72,7 @@ for (int i = startIndex; i < linhas.Length; i++)
 
 Console.WriteLine($"Registros lidos: {municipios.Count}");
 
+
 // Grupo por UF
 var porUf = new Dictionary<string, List<Municipio>>(StringComparer.OrdinalIgnoreCase);
 foreach (var m in municipios)
@@ -76,11 +82,13 @@ foreach (var m in municipios)
     porUf[m.Uf].Add(m);
 }
 
+
 // Ordena as UFs alfabeticamente e ignora a UF "EX"
 var ufsOrdenadas = porUf.Keys
     .Where(uf => !string.Equals(uf, "EX", StringComparison.OrdinalIgnoreCase))
     .OrderBy(uf => uf, StringComparer.OrdinalIgnoreCase)
     .ToList();
+
 
 // Gera saída
 Directory.CreateDirectory(outRoot);
@@ -90,52 +98,63 @@ foreach (var uf in ufsOrdenadas)
 {
     var listaUf = porUf[uf];
 
-    // Ordena por Nome preferido para saída consistente
     listaUf.Sort((a, b) => string.Compare(a.NomePreferido, b.NomePreferido, StringComparison.OrdinalIgnoreCase));
 
     Console.WriteLine($"Processando UF: {uf} ({listaUf.Count} municípios)");
     var swUf = Stopwatch.StartNew();
-    string outPath = Path.Combine(outRoot, $"municipios_hash_{uf}.csv");
-    using (var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None))
-    using (var swOut = new StreamWriter(fs, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+
+    var outPath = Path.Combine(outRoot, $"municipios_hash_{uf}.csv");
+    await using var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, 4096, useAsync: true);
+    await using var swOut = new StreamWriter(fs, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+
+    await swOut.WriteLineAsync("TOM;IBGE;NomeTOM;NomeIBGE;UF;Hash");
+
+
+
+    var computeTasks = listaUf.Select(m => Task.Run(() =>
     {
-        swOut.WriteLine("TOM;IBGE;NomeTOM;NomeIBGE;UF;Hash");
+        string password = m.ToConcatenatedString();
+        byte[] salt = Util.BuildSalt(m.Ibge);
+        string hashHex = Util.DeriveHashHex(password, salt, PBKDF2_ITERATIONS, HASH_BYTES);
+        return (m, hashHex);
+    })).ToArray();
 
-        var listaJson = new List<object>();
-        int count = 0;
-        foreach (var m in listaUf)
+    var results = await Task.WhenAll(computeTasks);
+
+    var listaJson = new List<object>(results.Length);
+    int count = 0;
+
+
+
+    foreach (var (m, hashHex) in results)
+    {
+        await swOut.WriteLineAsync($"{m.Tom};{m.Ibge};{m.NomeTom};{m.NomeIbge};{m.Uf};{hashHex}");
+
+        listaJson.Add(new
         {
-            // Password: todos os campos concatenados; Salt: IBGE + “pepper” fixo (opcional)
-            string password = m.ToConcatenatedString();
-            byte[] salt = Util.BuildSalt(m.Ibge);
+            m.Tom,
+            m.Ibge,
+            m.NomeTom,
+            m.NomeIbge,
+            m.Uf,
+            Hash = hashHex
+        });
 
-            // Trabalho pesado real (PBKDF2/SHA-256)
-            string hashHex = Util.DeriveHashHex(password, salt, PBKDF2_ITERATIONS, HASH_BYTES);
-
-            swOut.WriteLine($"{m.Tom};{m.Ibge};{m.NomeTom};{m.NomeIbge};{m.Uf};{hashHex}");
-
-            listaJson.Add(new {
-                m.Tom,
-                m.Ibge,
-                m.NomeTom,
-                m.NomeIbge,
-                m.Uf,
-                Hash = hashHex
-            });
-
-            count++;
-            if (count % 50 == 0 || count == listaUf.Count)
-            {
-                Console.WriteLine($"  Parcial: {count}/{listaUf.Count} municípios processados para UF {uf} | Tempo parcial: {FormatTempo(swUf.ElapsedMilliseconds)}");
-            }
+        count++;
+        if (count % 50 == 0 || count == results.Length)
+        {
+            Console.WriteLine($"  Parcial: {count}/{results.Length} municípios processados para UF {uf} | Tempo parcial: {FormatTempo(swUf.ElapsedMilliseconds)}");
         }
-        // Salva JSON
-        string jsonPath = Path.Combine(outRoot, $"municipios_hash_{uf}.json");
-        var json = JsonSerializer.Serialize(listaJson, new JsonSerializerOptions { WriteIndented = true });
-        File.WriteAllText(jsonPath, json, Encoding.UTF8);
-        swUf.Stop();
-        Console.WriteLine($"UF {uf} concluída. Arquivos gerados: CSV e JSON. Tempo total UF: {FormatTempo(swUf.ElapsedMilliseconds)}");
     }
+
+
+    // Salva JSON
+    string jsonPath = Path.Combine(outRoot, $"municipios_hash_{uf}.json");
+    var json = JsonSerializer.Serialize(listaJson, new JsonSerializerOptions { WriteIndented = true });
+    await File.WriteAllTextAsync(jsonPath, json, Encoding.UTF8);
+
+    swUf.Stop();
+    Console.WriteLine($"UF {uf} concluída. Arquivos gerados: CSV e JSON. Tempo total UF: {FormatTempo(swUf.ElapsedMilliseconds)}");
 }
 
 sw.Stop();
